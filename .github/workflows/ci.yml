@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Check formatting
+        run: cargo fmt -- --check
+      
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+      
+      - name: Run tests
+        run: cargo test --verbose
+
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: baihu-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/baihu*
+
+  docker:
+    name: Docker Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t baihu:test .
+
+      - name: Verify non-root user (UID != 0)
+        run: |
+          USER_ID=$(docker inspect --format='{{.Config.User}}' baihu:test)
+          echo "Container user: $USER_ID"
+          if [ "$USER_ID" = "0" ] || [ "$USER_ID" = "root" ] || [ -z "$USER_ID" ]; then
+            echo "❌ FAIL: Container runs as root (UID 0)"
+            exit 1
+          fi
+          echo "✅ PASS: Container runs as non-root user ($USER_ID)"
+
+      - name: Verify distroless nonroot base image
+        run: |
+          BASE_IMAGE=$(grep -E '^FROM.*runtime|^FROM gcr.io/distroless' Dockerfile | tail -1)
+          echo "Base image line: $BASE_IMAGE"
+          if ! echo "$BASE_IMAGE" | grep -q ':nonroot'; then
+            echo "❌ FAIL: Runtime stage does not use :nonroot variant"
+            exit 1
+          fi
+          echo "✅ PASS: Using distroless :nonroot variant"
+
+      - name: Verify USER directive exists
+        run: |
+          if ! grep -qE '^USER\s+[0-9]+' Dockerfile; then
+            echo "❌ FAIL: No explicit USER directive with numeric UID"
+            exit 1
+          fi
+          echo "✅ PASS: Explicit USER directive found"

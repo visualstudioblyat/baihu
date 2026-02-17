@@ -1,0 +1,9 @@
+/target
+*.db
+*.db-journal
+.DS_Store
+.claude/
+.tmp_todo_probe
+nul
+Baihu/
+baihu.png

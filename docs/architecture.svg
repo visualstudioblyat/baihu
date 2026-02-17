@@ -1,0 +1,195 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 720" font-family="'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace">
+  <defs>
+    <marker id="arr" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <path d="M0,0 L6,2.5 L0,5" fill="#6366f1"/>
+    </marker>
+    <marker id="arrMuted" markerWidth="6" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <path d="M0,0 L6,2.5 L0,5" fill="#4b5563"/>
+    </marker>
+  </defs>
+
+  <!-- bg -->
+  <rect width="1060" height="720" fill="#0f0f0f"/>
+
+  <!-- title block -->
+  <text x="530" y="40" text-anchor="middle" fill="#e5e5e5" font-size="20" font-weight="700" letter-spacing="0.5">baihu</text>
+  <text x="530" y="58" text-anchor="middle" fill="#6366f1" font-size="11">the smallest ai assistant that actually works. 100% rust.</text>
+
+  <!-- top stat bar -->
+  <text x="530" y="78" text-anchor="middle" fill="#525252" font-size="9">~4.5mb binary  ·  24ms startup  ·  482 tests  ·  22+ providers  ·  8 traits  ·  0 clippy warnings</text>
+
+  <!-- divider -->
+  <line x1="50" y1="92" x2="1010" y2="92" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- ── CHANNELS ── -->
+  <rect x="50" y="110" width="150" height="230" rx="6" fill="#141414" stroke="#1f1f1f" stroke-width="1"/>
+  <text x="125" y="132" text-anchor="middle" fill="#6366f1" font-size="11" font-weight="600">channels</text>
+
+  <text x="125" y="156" text-anchor="middle" fill="#a5a5a5" font-size="9">telegram</text>
+  <text x="125" y="174" text-anchor="middle" fill="#a5a5a5" font-size="9">discord</text>
+  <text x="125" y="192" text-anchor="middle" fill="#a5a5a5" font-size="9">slack</text>
+  <text x="125" y="210" text-anchor="middle" fill="#a5a5a5" font-size="9">imessage</text>
+  <text x="125" y="228" text-anchor="middle" fill="#a5a5a5" font-size="9">matrix</text>
+  <text x="125" y="246" text-anchor="middle" fill="#a5a5a5" font-size="9">webhook</text>
+  <text x="125" y="264" text-anchor="middle" fill="#a5a5a5" font-size="9">cli</text>
+
+  <text x="125" y="290" text-anchor="middle" fill="#525252" font-size="8" font-style="italic">+ any Channel trait</text>
+
+  <!-- arrow: channels → security -->
+  <line x1="200" y1="225" x2="218" y2="225" stroke="#6366f1" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ── SECURITY ── -->
+  <rect x="226" y="110" width="220" height="230" rx="6" fill="#141414" stroke="#1f1f1f" stroke-width="1"/>
+  <text x="336" y="132" text-anchor="middle" fill="#f59e0b" font-size="11" font-weight="600">security</text>
+
+  <text x="336" y="158" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">gateway pairing</text>
+  <text x="336" y="170" text-anchor="middle" fill="#737373" font-size="8">6-digit otp · bearer tokens · const-time eq</text>
+
+  <text x="336" y="192" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">auth gate</text>
+  <text x="336" y="204" text-anchor="middle" fill="#737373" font-size="8">channel allowlists · webhook_secret</text>
+
+  <text x="336" y="226" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">rate limiter</text>
+  <text x="336" y="238" text-anchor="middle" fill="#737373" font-size="8">sliding window · cost/day cap</text>
+
+  <text x="336" y="260" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">filesystem sandbox</text>
+  <text x="336" y="272" text-anchor="middle" fill="#737373" font-size="8">path jail · null byte · symlink escape</text>
+
+  <text x="336" y="294" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">encrypted secrets</text>
+  <text x="336" y="306" text-anchor="middle" fill="#737373" font-size="8">chacha20-poly1305 aead + key file</text>
+
+  <!-- ── TUNNEL ── -->
+  <rect x="462" y="110" width="148" height="230" rx="6" fill="#141414" stroke="#1f1f1f" stroke-width="1"/>
+  <text x="536" y="132" text-anchor="middle" fill="#06b6d4" font-size="11" font-weight="600">tunnel</text>
+  <text x="536" y="148" text-anchor="middle" fill="#525252" font-size="8">bring your own</text>
+
+  <text x="536" y="174" text-anchor="middle" fill="#a5a5a5" font-size="9">cloudflare</text>
+  <text x="536" y="194" text-anchor="middle" fill="#a5a5a5" font-size="9">tailscale</text>
+  <text x="536" y="214" text-anchor="middle" fill="#a5a5a5" font-size="9">ngrok</text>
+  <text x="536" y="234" text-anchor="middle" fill="#a5a5a5" font-size="9">bore / frp / ssh</text>
+
+  <text x="536" y="290" text-anchor="middle" fill="#525252" font-size="8" font-style="italic">+ any Tunnel trait</text>
+
+  <!-- ── PROVIDERS ── -->
+  <rect x="626" y="110" width="384" height="230" rx="6" fill="#141414" stroke="#1f1f1f" stroke-width="1"/>
+  <text x="818" y="132" text-anchor="middle" fill="#22c55e" font-size="11" font-weight="600">providers (22+)</text>
+  <text x="818" y="148" text-anchor="middle" fill="#525252" font-size="8">any openai-compatible api</text>
+
+  <!-- provider grid: 4 cols x 4 rows -->
+  <text x="690" y="174" text-anchor="middle" fill="#a5a5a5" font-size="9">openrouter</text>
+  <text x="782" y="174" text-anchor="middle" fill="#a5a5a5" font-size="9">anthropic</text>
+  <text x="874" y="174" text-anchor="middle" fill="#a5a5a5" font-size="9">openai</text>
+  <text x="960" y="174" text-anchor="middle" fill="#a5a5a5" font-size="9">ollama</text>
+
+  <text x="690" y="196" text-anchor="middle" fill="#a5a5a5" font-size="9">venice</text>
+  <text x="782" y="196" text-anchor="middle" fill="#a5a5a5" font-size="9">groq</text>
+  <text x="874" y="196" text-anchor="middle" fill="#a5a5a5" font-size="9">mistral</text>
+  <text x="960" y="196" text-anchor="middle" fill="#a5a5a5" font-size="9">xai / grok</text>
+
+  <text x="690" y="218" text-anchor="middle" fill="#a5a5a5" font-size="9">deepseek</text>
+  <text x="782" y="218" text-anchor="middle" fill="#a5a5a5" font-size="9">together ai</text>
+  <text x="874" y="218" text-anchor="middle" fill="#a5a5a5" font-size="9">fireworks</text>
+  <text x="960" y="218" text-anchor="middle" fill="#a5a5a5" font-size="9">perplexity</text>
+
+  <text x="690" y="240" text-anchor="middle" fill="#a5a5a5" font-size="9">cohere</text>
+  <text x="782" y="240" text-anchor="middle" fill="#a5a5a5" font-size="9">cloudflare ai</text>
+  <text x="874" y="240" text-anchor="middle" fill="#a5a5a5" font-size="9">bedrock</text>
+  <text x="960" y="240" text-anchor="middle" fill="#6366f1" font-size="9" font-weight="600">custom:url</text>
+
+  <text x="818" y="290" text-anchor="middle" fill="#525252" font-size="8" font-style="italic">+ any Provider trait / custom:url</text>
+
+  <!-- ── AGENT LOOP (center band) ── -->
+  <rect x="50" y="360" width="960" height="80" rx="6" fill="#141414" stroke="#6366f1" stroke-width="1"/>
+  <text x="530" y="382" text-anchor="middle" fill="#6366f1" font-size="12" font-weight="700">agent loop</text>
+
+  <!-- flow steps -->
+  <text x="110" y="410" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">message in</text>
+  <line x1="155" y1="407" x2="180" y2="407" stroke="#4b5563" stroke-width="1" marker-end="url(#arrMuted)"/>
+
+  <text x="240" y="410" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">memory recall</text>
+  <line x1="298" y1="407" x2="323" y2="407" stroke="#4b5563" stroke-width="1" marker-end="url(#arrMuted)"/>
+
+  <text x="365" y="410" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">llm</text>
+  <line x1="385" y1="407" x2="410" y2="407" stroke="#4b5563" stroke-width="1" marker-end="url(#arrMuted)"/>
+
+  <text x="450" y="410" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">tools</text>
+  <line x1="475" y1="407" x2="500" y2="407" stroke="#4b5563" stroke-width="1" marker-end="url(#arrMuted)"/>
+
+  <text x="558" y="410" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">memory save</text>
+  <line x1="613" y1="407" x2="638" y2="407" stroke="#4b5563" stroke-width="1" marker-end="url(#arrMuted)"/>
+
+  <text x="698" y="410" text-anchor="middle" fill="#d4d4d4" font-size="9" font-weight="500">response out</text>
+  <line x1="755" y1="407" x2="780" y2="407" stroke="#4b5563" stroke-width="1" marker-end="url(#arrMuted)"/>
+
+  <text x="870" y="404" text-anchor="middle" fill="#525252" font-size="9">composio</text>
+  <text x="870" y="418" text-anchor="middle" fill="#3f3f3f" font-size="8">1000+ oauth</text>
+
+  <!-- arrows into agent loop -->
+  <line x1="336" y1="340" x2="336" y2="360" stroke="#f59e0b" stroke-width="1" marker-end="url(#arrMuted)"/>
+  <line x1="536" y1="340" x2="536" y2="360" stroke="#06b6d4" stroke-width="1" marker-end="url(#arrMuted)"/>
+  <line x1="818" y1="340" x2="630" y2="360" stroke="#22c55e" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrMuted)"/>
+
+  <!-- divider -->
+  <line x1="50" y1="458" x2="1010" y2="458" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- ── MEMORY ENGINE ── -->
+  <rect x="50" y="472" width="480" height="170" rx="6" fill="#141414" stroke="#1f1f1f" stroke-width="1"/>
+  <text x="290" y="494" text-anchor="middle" fill="#8b5cf6" font-size="11" font-weight="600">memory search engine</text>
+  <text x="290" y="508" text-anchor="middle" fill="#525252" font-size="8">no pinecone, no elasticsearch, no langchain</text>
+
+  <text x="70" y="532" fill="#a5a5a5" font-size="9">vector db</text>
+  <text x="210" y="532" fill="#737373" font-size="8">sqlite blob + cosine similarity</text>
+
+  <text x="70" y="550" fill="#a5a5a5" font-size="9">keyword</text>
+  <text x="210" y="550" fill="#737373" font-size="8">fts5 virtual tables + bm25</text>
+
+  <text x="70" y="568" fill="#a5a5a5" font-size="9">hybrid merge</text>
+  <text x="210" y="568" fill="#737373" font-size="8">weighted vector + keyword fusion</text>
+
+  <text x="70" y="586" fill="#a5a5a5" font-size="9">embeddings</text>
+  <text x="210" y="586" fill="#737373" font-size="8">openai / custom url / noop</text>
+
+  <text x="70" y="604" fill="#a5a5a5" font-size="9">chunking</text>
+  <text x="210" y="604" fill="#737373" font-size="8">markdown-aware + heading context</text>
+
+  <text x="70" y="622" fill="#a5a5a5" font-size="9">caching</text>
+  <text x="210" y="622" fill="#737373" font-size="8">embedding_cache + lru eviction</text>
+
+  <!-- arrow: agent → memory -->
+  <line x1="290" y1="440" x2="290" y2="472" stroke="#8b5cf6" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ── SANDBOX ── -->
+  <rect x="546" y="472" width="226" height="170" rx="6" fill="#141414" stroke="#1f1f1f" stroke-width="1"/>
+  <text x="659" y="494" text-anchor="middle" fill="#ef4444" font-size="11" font-weight="600">sandbox</text>
+
+  <text x="659" y="520" text-anchor="middle" fill="#737373" font-size="8">command allowlist</text>
+  <text x="659" y="536" text-anchor="middle" fill="#737373" font-size="8">path jail + traversal block</text>
+  <text x="659" y="552" text-anchor="middle" fill="#737373" font-size="8">browser domain allowlist</text>
+  <text x="659" y="568" text-anchor="middle" fill="#737373" font-size="8">null byte + symlink escape</text>
+  <text x="659" y="584" text-anchor="middle" fill="#737373" font-size="8">system dirs + dotfiles blocked</text>
+  <text x="659" y="604" text-anchor="middle" fill="#a5a5a5" font-size="8">default: supervised + workspace-only</text>
+  <text x="659" y="620" text-anchor="middle" fill="#a5a5a5" font-size="8">levels: readonly / supervised / full</text>
+
+  <!-- arrow: agent → sandbox -->
+  <line x1="659" y1="440" x2="659" y2="472" stroke="#ef4444" stroke-width="1.5" marker-end="url(#arrMuted)"/>
+
+  <!-- ── HEARTBEAT / CRON ── -->
+  <rect x="788" y="472" width="222" height="170" rx="6" fill="#141414" stroke="#1f1f1f" stroke-width="1"/>
+  <text x="899" y="494" text-anchor="middle" fill="#06b6d4" font-size="11" font-weight="600">heartbeat &amp; cron</text>
+
+  <text x="899" y="520" text-anchor="middle" fill="#737373" font-size="8">HEARTBEAT.md periodic tasks</text>
+  <text x="899" y="538" text-anchor="middle" fill="#737373" font-size="8">scheduled actions</text>
+  <text x="899" y="556" text-anchor="middle" fill="#737373" font-size="8">skills loader (toml manifests)</text>
+  <text x="899" y="574" text-anchor="middle" fill="#737373" font-size="8">50+ integrations registry</text>
+  <text x="899" y="592" text-anchor="middle" fill="#737373" font-size="8">observability (noop/log/multi)</text>
+
+  <!-- arrow: agent → heartbeat -->
+  <line x1="899" y1="440" x2="899" y2="472" stroke="#06b6d4" stroke-width="1.5" marker-end="url(#arrMuted)"/>
+
+  <!-- divider -->
+  <line x1="50" y1="658" x2="1010" y2="658" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- ── SETUP WIZARD ── -->
+  <text x="530" y="680" text-anchor="middle" fill="#6366f1" font-size="11" font-weight="600">baihu onboard</text>
+  <text x="530" y="696" text-anchor="middle" fill="#525252" font-size="9">workspace → provider → channels → tunnel → tools → personalize → scaffold</text>
+  <text x="530" y="712" text-anchor="middle" fill="#3f3f3f" font-size="8">7 steps · under 60 seconds · live connection testing · secure defaults</text>
+</svg>

@@ -1,0 +1,947 @@
+// Encrypted secret store — defense-in-depth for API keys and tokens.
+//
+// Secrets are encrypted using ChaCha20-Poly1305 AEAD with a random key stored
+// in `~/.baihu/.secret_key` with restrictive file permissions (0600). The
+// config file stores only hex-encoded ciphertext, never plaintext keys.
+//
+// Each encryption generates a fresh random 12-byte nonce, prepended to the
+// ciphertext. The Poly1305 authentication tag prevents tampering.
+//
+// This prevents:
+//   - Plaintext exposure in config files
+//   - Casual `grep` or `git log` leaks
+//   - Accidental commit of raw API keys
+//   - Known-plaintext attacks (unlike the previous XOR cipher)
+//   - Ciphertext tampering (authenticated encryption)
+//
+// For sovereign users who prefer plaintext, `secrets.encrypt = false` disables this.
+//
+// Migration: values with the legacy `enc:` prefix (XOR cipher) are decrypted
+// using the old algorithm for backward compatibility. New encryptions always
+// produce `enc2:` (ChaCha20-Poly1305).
+
+use anyhow::{Context, Result};
+use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
+use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, Nonce};
+use std::fs;
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
+
+const KEY_LEN: usize = 32;
+const NONCE_LEN: usize = 12;
+
+#[derive(Debug, Clone)]
+pub struct SecretStore {
+    key_path: PathBuf,
+    enabled: bool,
+}
+
+impl SecretStore {
+    pub fn new(baihu_dir: &Path, enabled: bool) -> Self {
+        Self {
+            key_path: baihu_dir.join(".secret_key"),
+            enabled,
+        }
+    }
+
+    // format: enc2:<hex(nonce ‖ ciphertext ‖ tag)>
+    pub fn encrypt(&self, plaintext: &str) -> Result<String> {
+        if !self.enabled || plaintext.is_empty() {
+            return Ok(plaintext.to_string());
+        }
+
+        let key_bytes = self.load_or_create_key()?;
+        let key = Key::from_slice(&key_bytes);
+        let cipher = ChaCha20Poly1305::new(key);
+
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
+
+        // Prepend nonce to ciphertext for storage
+        let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ciphertext);
+
+        Ok(format!("enc2:{}", hex_encode(&blob)))
+    }
+
+    pub fn decrypt(&self, value: &str) -> Result<String> {
+        if let Some(hex_str) = value.strip_prefix("enc2:") {
+            self.decrypt_chacha20(hex_str)
+        } else if let Some(hex_str) = value.strip_prefix("enc:") {
+            self.decrypt_legacy_xor(hex_str)
+        } else {
+            Ok(value.to_string())
+        }
+    }
+
+    // returns (plaintext, Some(migrated_enc2)) if legacy enc: was upgraded
+    pub fn decrypt_and_migrate(&self, value: &str) -> Result<(String, Option<String>)> {
+        if let Some(hex_str) = value.strip_prefix("enc2:") {
+            // Already using secure format — no migration needed
+            let plaintext = self.decrypt_chacha20(hex_str)?;
+            Ok((plaintext, None))
+        } else if let Some(hex_str) = value.strip_prefix("enc:") {
+            // Legacy XOR cipher — decrypt and re-encrypt with ChaCha20-Poly1305
+            tracing::warn!(
+                "Decrypting legacy XOR-encrypted secret (enc: prefix). \
+                 This format is insecure and will be removed in a future release. \
+                 The secret will be automatically migrated to enc2: (ChaCha20-Poly1305)."
+            );
+            let plaintext = self.decrypt_legacy_xor(hex_str)?;
+            let migrated = self.encrypt(&plaintext)?;
+            Ok((plaintext, Some(migrated)))
+        } else {
+            // Plaintext — no migration needed
+            Ok((value.to_string(), None))
+        }
+    }
+
+    pub fn needs_migration(value: &str) -> bool {
+        value.starts_with("enc:")
+    }
+
+    fn decrypt_chacha20(&self, hex_str: &str) -> Result<String> {
+        let blob =
+            hex_decode(hex_str).context("Failed to decode encrypted secret (corrupt hex)")?;
+        anyhow::ensure!(
+            blob.len() > NONCE_LEN,
+            "Encrypted value too short (missing nonce)"
+        );
+
+        let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let key_bytes = self.load_or_create_key()?;
+        let key = Key::from_slice(&key_bytes);
+        let cipher = ChaCha20Poly1305::new(key);
+
+        let plaintext_bytes = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| anyhow::anyhow!("Decryption failed — wrong key or tampered data"))?;
+
+        String::from_utf8(plaintext_bytes)
+            .context("Decrypted secret is not valid UTF-8 — corrupt data")
+    }
+
+    fn decrypt_legacy_xor(&self, hex_str: &str) -> Result<String> {
+        let ciphertext = hex_decode(hex_str)
+            .context("Failed to decode legacy encrypted secret (corrupt hex)")?;
+        let key = self.load_or_create_key()?;
+        let plaintext_bytes = xor_cipher(&ciphertext, &key);
+        String::from_utf8(plaintext_bytes)
+            .context("Decrypted legacy secret is not valid UTF-8 — wrong key or corrupt data")
+    }
+
+    pub fn is_encrypted(value: &str) -> bool {
+        value.starts_with("enc2:") || value.starts_with("enc:")
+    }
+
+    pub fn is_secure_encrypted(value: &str) -> bool {
+        value.starts_with("enc2:")
+    }
+
+    fn load_or_create_key(&self) -> Result<Zeroizing<Vec<u8>>> {
+        if self.key_path.exists() {
+            let raw =
+                fs::read_to_string(&self.key_path).context("Failed to read secret key file")?;
+            let trimmed = raw.trim();
+
+            // Try DPAPI-wrapped format first (dpapi:<hex>), then plain hex
+            #[cfg(windows)]
+            if let Some(dpapi_hex) = trimmed.strip_prefix("dpapi:") {
+                match dpapi::unprotect(&hex_decode(dpapi_hex).context("DPAPI hex corrupt")?) {
+                    Ok(plaintext) => {
+                        let hex_key = String::from_utf8(plaintext)
+                            .context("DPAPI decrypted key is not valid UTF-8")?;
+                        let key =
+                            hex_decode(hex_key.trim()).context("Secret key file is corrupt")?;
+                        return Ok(Zeroizing::new(key));
+                    }
+                    Err(e) => {
+                        tracing::warn!("DPAPI decrypt failed ({e}), trying plain hex fallback");
+                    }
+                }
+            }
+
+            let key = hex_decode(trimmed).context("Secret key file is corrupt")?;
+
+            // Migrate plain hex -> DPAPI-wrapped on Windows
+            #[cfg(windows)]
+            {
+                let hex_str = hex_encode(&key);
+                if let Ok(protected) = dpapi::protect(hex_str.as_bytes()) {
+                    let dpapi_content = format!("dpapi:{}", hex_encode(&protected));
+                    if let Err(e) =
+                        super::atomic_write::atomic_write(&self.key_path, dpapi_content.as_bytes())
+                    {
+                        tracing::warn!("Failed to migrate key to DPAPI: {e}");
+                    } else {
+                        tracing::info!("Migrated secret key to DPAPI envelope encryption");
+                    }
+                }
+            }
+
+            Ok(Zeroizing::new(key))
+        } else {
+            let key = Zeroizing::new(generate_random_key());
+            if let Some(parent) = self.key_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            // On Windows, wrap with DPAPI before writing
+            #[cfg(windows)]
+            {
+                let hex_str = hex_encode(&key);
+                let content = match dpapi::protect(hex_str.as_bytes()) {
+                    Ok(protected) => format!("dpapi:{}", hex_encode(&protected)),
+                    Err(e) => {
+                        tracing::warn!("DPAPI protect failed ({e}), storing plain hex");
+                        hex_str
+                    }
+                };
+                super::atomic_write::atomic_write(&self.key_path, content.as_bytes())
+                    .context("Failed to write secret key file")?;
+            }
+            #[cfg(not(windows))]
+            {
+                super::atomic_write::atomic_write(&self.key_path, hex_encode(&key).as_bytes())
+                    .context("Failed to write secret key file")?;
+            }
+
+            // Set restrictive permissions
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&self.key_path, fs::Permissions::from_mode(0o600))
+                    .context("Failed to set key file permissions")?;
+            }
+            #[cfg(windows)]
+            {
+                let username = std::env::var("USERNAME").unwrap_or_default();
+                if username.trim().is_empty() {
+                    tracing::warn!(
+                        "USERNAME env var is empty — skipping icacls permission restriction on secret key file"
+                    );
+                } else {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&self.key_path)
+                        .args(["/inheritance:r", "/grant:r"])
+                        .arg(format!("{username}:F"))
+                        .output();
+                }
+            }
+
+            Ok(key)
+        }
+    }
+}
+
+fn xor_cipher(data: &[u8], key: &[u8]) -> Vec<u8> {
+    if key.is_empty() {
+        return data.to_vec();
+    }
+    data.iter()
+        .enumerate()
+        .map(|(i, &b)| b ^ key[i % key.len()])
+        .collect()
+}
+
+fn generate_random_key() -> Vec<u8> {
+    // CSPRNG — full 256-bit entropy from OS random source.
+    // Previous impl used UUID v4 which has fixed bits at bytes 6 and 8,
+    // reducing effective entropy from 256 to ~244 bits.
+    ChaCha20Poly1305::generate_key(&mut OsRng).to_vec()
+}
+
+fn hex_encode(data: &[u8]) -> String {
+    let mut s = String::with_capacity(data.len() * 2);
+    for b in data {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+fn hex_decode(hex: &str) -> Result<Vec<u8>> {
+    #[allow(clippy::manual_is_multiple_of)]
+    if hex.len() % 2 != 0 {
+        anyhow::bail!("Hex string has odd length");
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid hex at position {i}: {e}"))
+        })
+        .collect()
+}
+
+// DPAPI envelope encryption for Windows.
+// Wraps/unwraps secret key material using the current user's DPAPI master key.
+#[cfg(windows)]
+mod dpapi {
+    use anyhow::Result;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN,
+    };
+
+    #[repr(C)]
+    struct DataBlob {
+        cb_data: u32,
+        pb_data: *mut u8,
+    }
+
+    /// Encrypt data with DPAPI (current user scope).
+    /// Wrapped in `catch_unwind` to prevent FFI panics from unwinding across boundaries.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn protect(plaintext: &[u8]) -> Result<Vec<u8>> {
+        let input_data = plaintext.to_vec();
+        std::panic::catch_unwind(|| {
+            unsafe {
+                let mut input = DataBlob {
+                    cb_data: input_data.len() as u32,
+                    pb_data: input_data.as_ptr().cast_mut(),
+                };
+                let mut output: DataBlob = std::mem::zeroed();
+
+                let ok = CryptProtectData(
+                    (&raw mut input).cast(),
+                    std::ptr::null(),     // description
+                    std::ptr::null_mut(), // entropy
+                    std::ptr::null_mut(), // reserved
+                    std::ptr::null_mut(), // prompt
+                    CRYPTPROTECT_UI_FORBIDDEN,
+                    (&raw mut output).cast(),
+                );
+
+                if ok == 0 {
+                    return Err(anyhow::anyhow!("CryptProtectData failed"));
+                }
+
+                let result =
+                    std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec();
+                LocalFree(output.pb_data.cast::<std::ffi::c_void>());
+                Ok(result)
+            }
+        })
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("CryptProtectData panicked in FFI call")))
+    }
+
+    /// Decrypt DPAPI-protected data (current user scope).
+    /// Wrapped in `catch_unwind` to prevent FFI panics from unwinding across boundaries.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn unprotect(protected: &[u8]) -> Result<Vec<u8>> {
+        let input_data = protected.to_vec();
+        std::panic::catch_unwind(|| {
+            unsafe {
+                let mut input = DataBlob {
+                    cb_data: input_data.len() as u32,
+                    pb_data: input_data.as_ptr().cast_mut(),
+                };
+                let mut output: DataBlob = std::mem::zeroed();
+
+                let ok = CryptUnprotectData(
+                    (&raw mut input).cast(),
+                    std::ptr::null_mut(), // description
+                    std::ptr::null_mut(), // entropy
+                    std::ptr::null_mut(), // reserved
+                    std::ptr::null_mut(), // prompt
+                    CRYPTPROTECT_UI_FORBIDDEN,
+                    (&raw mut output).cast(),
+                );
+
+                if ok == 0 {
+                    return Err(anyhow::anyhow!("CryptUnprotectData failed"));
+                }
+
+                let result =
+                    std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec();
+                LocalFree(output.pb_data.cast::<std::ffi::c_void>());
+                Ok(result)
+            }
+        })
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("CryptUnprotectData panicked in FFI call")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // ── SecretStore basics ─────────────────────────────────────
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        let secret = "sk-my-secret-api-key-12345";
+
+        let encrypted = store.encrypt(secret).unwrap();
+        assert!(encrypted.starts_with("enc2:"), "Should have enc2: prefix");
+        assert_ne!(encrypted, secret, "Should not be plaintext");
+
+        let decrypted = store.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, secret, "Roundtrip must preserve original");
+    }
+
+    #[test]
+    fn encrypt_empty_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        let result = store.encrypt("").unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn decrypt_plaintext_passthrough() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        // Values without "enc:"/"enc2:" prefix are returned as-is (backward compat)
+        let result = store.decrypt("sk-plaintext-key").unwrap();
+        assert_eq!(result, "sk-plaintext-key");
+    }
+
+    #[test]
+    fn disabled_store_returns_plaintext() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), false);
+        let result = store.encrypt("sk-secret").unwrap();
+        assert_eq!(result, "sk-secret", "Disabled store should not encrypt");
+    }
+
+    #[test]
+    fn is_encrypted_detects_prefix() {
+        assert!(SecretStore::is_encrypted("enc2:aabbcc"));
+        assert!(SecretStore::is_encrypted("enc:aabbcc")); // legacy
+        assert!(!SecretStore::is_encrypted("sk-plaintext"));
+        assert!(!SecretStore::is_encrypted(""));
+    }
+
+    #[test]
+    fn key_file_created_on_first_encrypt() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        assert!(!store.key_path.exists());
+
+        store.encrypt("test").unwrap();
+        assert!(store.key_path.exists(), "Key file should be created");
+
+        let key_content = fs::read_to_string(&store.key_path).unwrap();
+        // On Windows, key is DPAPI-wrapped (dpapi:<hex>); on other platforms, plain hex
+        #[cfg(windows)]
+        assert!(
+            key_content.starts_with("dpapi:"),
+            "Key file should use DPAPI envelope on Windows"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            key_content.len(),
+            KEY_LEN * 2,
+            "Key should be {KEY_LEN} bytes hex-encoded"
+        );
+    }
+
+    #[test]
+    fn encrypting_same_value_produces_different_ciphertext() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let e1 = store.encrypt("secret").unwrap();
+        let e2 = store.encrypt("secret").unwrap();
+        assert_ne!(
+            e1, e2,
+            "AEAD with random nonce should produce different ciphertext each time"
+        );
+
+        // Both should still decrypt to the same value
+        assert_eq!(store.decrypt(&e1).unwrap(), "secret");
+        assert_eq!(store.decrypt(&e2).unwrap(), "secret");
+    }
+
+    #[test]
+    fn different_stores_same_dir_interop() {
+        let tmp = TempDir::new().unwrap();
+        let store1 = SecretStore::new(tmp.path(), true);
+        let store2 = SecretStore::new(tmp.path(), true);
+
+        let encrypted = store1.encrypt("cross-store-secret").unwrap();
+        let decrypted = store2.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, "cross-store-secret");
+    }
+
+    #[test]
+    fn unicode_secret_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        let secret = "sk-日本語テスト-émojis-🦀";
+
+        let encrypted = store.encrypt(secret).unwrap();
+        let decrypted = store.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, secret);
+    }
+
+    #[test]
+    fn long_secret_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        let secret = "a".repeat(10_000);
+
+        let encrypted = store.encrypt(&secret).unwrap();
+        let decrypted = store.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, secret);
+    }
+
+    #[test]
+    fn corrupt_hex_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        let result = store.decrypt("enc2:not-valid-hex!!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tampered_ciphertext_detected() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        let encrypted = store.encrypt("sensitive-data").unwrap();
+
+        // Flip a bit in the ciphertext (after the "enc2:" prefix)
+        let hex_str = &encrypted[5..];
+        let mut blob = hex_decode(hex_str).unwrap();
+        // Modify a byte in the ciphertext portion (after the 12-byte nonce)
+        if blob.len() > NONCE_LEN {
+            blob[NONCE_LEN] ^= 0xff;
+        }
+        let tampered = format!("enc2:{}", hex_encode(&blob));
+
+        let result = store.decrypt(&tampered);
+        assert!(result.is_err(), "Tampered ciphertext must be rejected");
+    }
+
+    #[test]
+    fn wrong_key_detected() {
+        let tmp1 = TempDir::new().unwrap();
+        let tmp2 = TempDir::new().unwrap();
+        let store1 = SecretStore::new(tmp1.path(), true);
+        let store2 = SecretStore::new(tmp2.path(), true);
+
+        let encrypted = store1.encrypt("secret-for-store1").unwrap();
+        let result = store2.decrypt(&encrypted);
+        assert!(result.is_err(), "Decrypting with a different key must fail");
+    }
+
+    #[test]
+    fn truncated_ciphertext_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        // Only a few bytes — shorter than nonce
+        let result = store.decrypt("enc2:aabbccdd");
+        assert!(result.is_err(), "Too-short ciphertext must be rejected");
+    }
+
+    // ── Legacy XOR backward compatibility ───────────────────────
+
+    #[test]
+    fn legacy_xor_decrypt_still_works() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        // Trigger key creation via an encrypt call
+        let _ = store.encrypt("setup").unwrap();
+        let key = store.load_or_create_key().unwrap();
+
+        // Manually produce a legacy XOR-encrypted value
+        let plaintext = "sk-legacy-api-key";
+        let ciphertext = xor_cipher(plaintext.as_bytes(), &key);
+        let legacy_value = format!("enc:{}", hex_encode(&ciphertext));
+
+        // Store should still be able to decrypt legacy values
+        let decrypted = store.decrypt(&legacy_value).unwrap();
+        assert_eq!(decrypted, plaintext, "Legacy XOR values must still decrypt");
+    }
+
+    // ── Migration tests ─────────────────────────────────────────
+
+    #[test]
+    fn needs_migration_detects_legacy_prefix() {
+        assert!(SecretStore::needs_migration("enc:aabbcc"));
+        assert!(!SecretStore::needs_migration("enc2:aabbcc"));
+        assert!(!SecretStore::needs_migration("sk-plaintext"));
+        assert!(!SecretStore::needs_migration(""));
+    }
+
+    #[test]
+    fn is_secure_encrypted_detects_enc2_only() {
+        assert!(SecretStore::is_secure_encrypted("enc2:aabbcc"));
+        assert!(!SecretStore::is_secure_encrypted("enc:aabbcc"));
+        assert!(!SecretStore::is_secure_encrypted("sk-plaintext"));
+        assert!(!SecretStore::is_secure_encrypted(""));
+    }
+
+    #[test]
+    fn decrypt_and_migrate_returns_none_for_enc2() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let encrypted = store.encrypt("my-secret").unwrap();
+        assert!(encrypted.starts_with("enc2:"));
+
+        let (plaintext, migrated) = store.decrypt_and_migrate(&encrypted).unwrap();
+        assert_eq!(plaintext, "my-secret");
+        assert!(
+            migrated.is_none(),
+            "enc2: values should not trigger migration"
+        );
+    }
+
+    #[test]
+    fn decrypt_and_migrate_returns_none_for_plaintext() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let (plaintext, migrated) = store.decrypt_and_migrate("sk-plaintext-key").unwrap();
+        assert_eq!(plaintext, "sk-plaintext-key");
+        assert!(
+            migrated.is_none(),
+            "Plaintext values should not trigger migration"
+        );
+    }
+
+    #[test]
+    fn decrypt_and_migrate_upgrades_legacy_xor() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        // Create key first
+        let _ = store.encrypt("setup").unwrap();
+        let key = store.load_or_create_key().unwrap();
+
+        // Manually create a legacy XOR-encrypted value
+        let plaintext = "sk-legacy-secret-to-migrate";
+        let ciphertext = xor_cipher(plaintext.as_bytes(), &key);
+        let legacy_value = format!("enc:{}", hex_encode(&ciphertext));
+
+        // Verify it needs migration
+        assert!(SecretStore::needs_migration(&legacy_value));
+
+        // Decrypt and migrate
+        let (decrypted, migrated) = store.decrypt_and_migrate(&legacy_value).unwrap();
+        assert_eq!(decrypted, plaintext, "Plaintext must match original");
+        assert!(migrated.is_some(), "Legacy value should trigger migration");
+
+        let new_value = migrated.unwrap();
+        assert!(
+            new_value.starts_with("enc2:"),
+            "Migrated value must use enc2: prefix"
+        );
+        assert!(
+            !SecretStore::needs_migration(&new_value),
+            "Migrated value should not need migration"
+        );
+
+        // Verify the migrated value decrypts correctly
+        let (decrypted2, migrated2) = store.decrypt_and_migrate(&new_value).unwrap();
+        assert_eq!(
+            decrypted2, plaintext,
+            "Migrated value must decrypt to same plaintext"
+        );
+        assert!(
+            migrated2.is_none(),
+            "Migrated value should not trigger another migration"
+        );
+    }
+
+    #[test]
+    fn decrypt_and_migrate_handles_unicode() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let _ = store.encrypt("setup").unwrap();
+        let key = store.load_or_create_key().unwrap();
+
+        let plaintext = "sk-日本語-émojis-🦀-тест";
+        let ciphertext = xor_cipher(plaintext.as_bytes(), &key);
+        let legacy_value = format!("enc:{}", hex_encode(&ciphertext));
+
+        let (decrypted, migrated) = store.decrypt_and_migrate(&legacy_value).unwrap();
+        assert_eq!(decrypted, plaintext);
+        assert!(migrated.is_some());
+
+        // Verify migrated value works
+        let new_value = migrated.unwrap();
+        let (decrypted2, _) = store.decrypt_and_migrate(&new_value).unwrap();
+        assert_eq!(decrypted2, plaintext);
+    }
+
+    #[test]
+    fn decrypt_and_migrate_handles_empty_secret() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let _ = store.encrypt("setup").unwrap();
+        let key = store.load_or_create_key().unwrap();
+
+        // Empty plaintext XOR-encrypted
+        let plaintext = "";
+        let ciphertext = xor_cipher(plaintext.as_bytes(), &key);
+        let legacy_value = format!("enc:{}", hex_encode(&ciphertext));
+
+        let (decrypted, migrated) = store.decrypt_and_migrate(&legacy_value).unwrap();
+        assert_eq!(decrypted, plaintext);
+        // Empty string encryption returns empty string (not enc2:)
+        assert!(migrated.is_some());
+        assert_eq!(migrated.unwrap(), "");
+    }
+
+    #[test]
+    fn decrypt_and_migrate_handles_long_secret() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let _ = store.encrypt("setup").unwrap();
+        let key = store.load_or_create_key().unwrap();
+
+        let plaintext = "a".repeat(10_000);
+        let ciphertext = xor_cipher(plaintext.as_bytes(), &key);
+        let legacy_value = format!("enc:{}", hex_encode(&ciphertext));
+
+        let (decrypted, migrated) = store.decrypt_and_migrate(&legacy_value).unwrap();
+        assert_eq!(decrypted, plaintext);
+        assert!(migrated.is_some());
+
+        let new_value = migrated.unwrap();
+        let (decrypted2, _) = store.decrypt_and_migrate(&new_value).unwrap();
+        assert_eq!(decrypted2, plaintext);
+    }
+
+    #[test]
+    fn decrypt_and_migrate_fails_on_corrupt_legacy_hex() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        let _ = store.encrypt("setup").unwrap();
+
+        let result = store.decrypt_and_migrate("enc:not-valid-hex!!");
+        assert!(result.is_err(), "Corrupt hex should fail");
+    }
+
+    #[test]
+    fn decrypt_and_migrate_wrong_key_produces_garbage_or_fails() {
+        let tmp1 = TempDir::new().unwrap();
+        let tmp2 = TempDir::new().unwrap();
+        let store1 = SecretStore::new(tmp1.path(), true);
+        let store2 = SecretStore::new(tmp2.path(), true);
+
+        // Create keys for both stores
+        let _ = store1.encrypt("setup").unwrap();
+        let _ = store2.encrypt("setup").unwrap();
+        let key1 = store1.load_or_create_key().unwrap();
+
+        // Encrypt with store1's key
+        let plaintext = "secret-for-store1";
+        let ciphertext = xor_cipher(plaintext.as_bytes(), &key1);
+        let legacy_value = format!("enc:{}", hex_encode(&ciphertext));
+
+        // Decrypt with store2 — XOR will produce garbage bytes
+        // This may fail with UTF-8 error or succeed with garbage plaintext
+        match store2.decrypt_and_migrate(&legacy_value) {
+            Ok((decrypted, _)) => {
+                // If it succeeds, the plaintext should be garbage (not the original)
+                assert_ne!(
+                    decrypted, plaintext,
+                    "Wrong key should produce garbage plaintext"
+                );
+            }
+            Err(e) => {
+                // Expected: UTF-8 decoding failure from garbage bytes
+                assert!(
+                    e.to_string().contains("UTF-8"),
+                    "Error should be UTF-8 related: {e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn migration_produces_different_ciphertext_each_time() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let _ = store.encrypt("setup").unwrap();
+        let key = store.load_or_create_key().unwrap();
+
+        let plaintext = "sk-same-secret";
+        let ciphertext = xor_cipher(plaintext.as_bytes(), &key);
+        let legacy_value = format!("enc:{}", hex_encode(&ciphertext));
+
+        let (_, migrated1) = store.decrypt_and_migrate(&legacy_value).unwrap();
+        let (_, migrated2) = store.decrypt_and_migrate(&legacy_value).unwrap();
+
+        assert!(migrated1.is_some());
+        assert!(migrated2.is_some());
+        assert_ne!(
+            migrated1.unwrap(),
+            migrated2.unwrap(),
+            "Each migration should produce different ciphertext (random nonce)"
+        );
+    }
+
+    #[test]
+    fn migrated_value_is_tamper_resistant() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let _ = store.encrypt("setup").unwrap();
+        let key = store.load_or_create_key().unwrap();
+
+        let plaintext = "sk-sensitive-data";
+        let ciphertext = xor_cipher(plaintext.as_bytes(), &key);
+        let legacy_value = format!("enc:{}", hex_encode(&ciphertext));
+
+        let (_, migrated) = store.decrypt_and_migrate(&legacy_value).unwrap();
+        let new_value = migrated.unwrap();
+
+        // Tamper with the migrated value
+        let hex_str = &new_value[5..];
+        let mut blob = hex_decode(hex_str).unwrap();
+        if blob.len() > NONCE_LEN {
+            blob[NONCE_LEN] ^= 0xff;
+        }
+        let tampered = format!("enc2:{}", hex_encode(&blob));
+
+        let result = store.decrypt_and_migrate(&tampered);
+        assert!(result.is_err(), "Tampered migrated value must be rejected");
+    }
+
+    // ── Low-level helpers ───────────────────────────────────────
+
+    #[test]
+    fn xor_cipher_roundtrip() {
+        let key = b"testkey123";
+        let data = b"hello world";
+        let encrypted = xor_cipher(data, key);
+        let decrypted = xor_cipher(&encrypted, key);
+        assert_eq!(decrypted, data);
+    }
+
+    #[test]
+    fn xor_cipher_empty_key() {
+        let data = b"passthrough";
+        let result = xor_cipher(data, &[]);
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn hex_roundtrip() {
+        let data = vec![0x00, 0x01, 0xfe, 0xff, 0xab, 0xcd];
+        let encoded = hex_encode(&data);
+        assert_eq!(encoded, "0001feffabcd");
+        let decoded = hex_decode(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn hex_decode_odd_length_fails() {
+        assert!(hex_decode("abc").is_err());
+    }
+
+    #[test]
+    fn hex_decode_invalid_chars_fails() {
+        assert!(hex_decode("zzzz").is_err());
+    }
+
+    #[test]
+    fn generate_random_key_correct_length() {
+        let key = generate_random_key();
+        assert_eq!(key.len(), KEY_LEN);
+    }
+
+    #[test]
+    fn generate_random_key_full_entropy() {
+        // Verify no byte position has a fixed pattern across samples.
+        // UUID v4 had fixed bits at bytes 6 (version=0x4_) and 8 (variant=0b10__).
+        // With CSPRNG, every bit should vary across samples.
+        let samples: Vec<Vec<u8>> = (0..100).map(|_| generate_random_key()).collect();
+        for pos in 0..KEY_LEN {
+            let values: std::collections::HashSet<u8> = samples.iter().map(|k| k[pos]).collect();
+            assert!(
+                values.len() > 1,
+                "Byte position {pos} has the same value across all 100 samples — fixed bits detected"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_random_key_not_all_zeros() {
+        let key = generate_random_key();
+        assert!(key.iter().any(|&b| b != 0), "Key should not be all zeros");
+    }
+
+    #[test]
+    fn two_random_keys_differ() {
+        let k1 = generate_random_key();
+        let k2 = generate_random_key();
+        assert_ne!(k1, k2, "Two random keys should differ");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        store.encrypt("trigger key creation").unwrap();
+
+        let perms = fs::metadata(&store.key_path).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "Key file must be owner-only (0600)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dpapi_roundtrip() {
+        let data = b"test-secret-key-material-32bytes!";
+        let protected = super::dpapi::protect(data).unwrap();
+        assert_ne!(protected, data, "DPAPI should encrypt the data");
+        let unprotected = super::dpapi::unprotect(&protected).unwrap();
+        assert_eq!(unprotected, data, "DPAPI roundtrip must preserve data");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dpapi_key_file_has_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+        store.encrypt("trigger key creation").unwrap();
+
+        let content = fs::read_to_string(&store.key_path).unwrap();
+        assert!(
+            content.starts_with("dpapi:"),
+            "Key file should use DPAPI envelope on Windows"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dpapi_encrypted_key_still_decrypts_secrets() {
+        let tmp = TempDir::new().unwrap();
+        let store = SecretStore::new(tmp.path(), true);
+
+        let encrypted = store.encrypt("sk-dpapi-test-key").unwrap();
+        assert!(encrypted.starts_with("enc2:"));
+
+        // Key file should be DPAPI-wrapped
+        let key_content = fs::read_to_string(&store.key_path).unwrap();
+        assert!(key_content.starts_with("dpapi:"));
+
+        // Should still decrypt correctly
+        let decrypted = store.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, "sk-dpapi-test-key");
+    }
+}
